@@ -1186,6 +1186,14 @@ func (s *Syncer) handleTxInvs(ctx context.Context, rp *p2p.RemotePeer, hashes []
 				rp.Disconnect(err)
 				return
 			}
+			continue
+		}
+		// A peer announced this tx, so it is in the network mempool.
+		// Unpublished VSP fee txs stay "Pending by VSP" until this bit
+		// flips — the VSP API "broadcast" poll can lag the explorer.
+		hash := tx.TxHash()
+		if err := s.wallet.SetPublished(ctx, &hash, true); err != nil {
+			log.Debugf("SetPublished(%v) after mempool announce: %v", &hash, err)
 		}
 	}
 	s.mempoolTxs(relevant)
@@ -1944,6 +1952,15 @@ func (s *Syncer) peerStartup(ctx context.Context, rp *p2p.RemotePeer) error {
 		if err != nil {
 			// TODO: Transactions should be removed if this is a double spend.
 			log.Errorf("Failed to resent one or more unmined transactions: %v", err)
+		}
+		// Push the full transaction bytes as well; the inv-only
+		// announcement gives no delivery guarantee (see
+		// Syncer.PublishTransactions).
+		for _, tx := range unminedTxs {
+			if err := rp.SendMessage(ctx, tx); err != nil {
+				log.Errorf("Failed to resend unmined transaction %v: %v", tx.TxHash(), err)
+				break
+			}
 		}
 	}
 
