@@ -219,24 +219,29 @@ func (c *VSPClient) ProcessManagedTickets(ctx context.Context, tickets []*VSPTic
 			continue
 		}
 
+		// Errors below are per ticket: log them and keep going, or every
+		// later ticket would be skipped.
 		if status.FeeTxStatus == "confirmed" {
 			feeHash, err := chainhash.NewHashFromStr(status.FeeTxHash)
 			if err != nil {
-				return err
+				c.log.Errorf("ProcessManagedTickets: %v: bad fee hash %q: %v", hash, status.FeeTxHash, err)
+				continue
 			}
 			err = ticket.UpdateFeeConfirmed(ctx, *feeHash, c.Client.URL, c.Client.PubKey)
 			if err != nil {
-				return err
+				c.log.Errorf("ProcessManagedTickets: %v: record confirmed fee: %v", hash, err)
 			}
 			continue
 		} else if status.FeeTxHash != "" {
 			feeHash, err := chainhash.NewHashFromStr(status.FeeTxHash)
 			if err != nil {
-				return err
+				c.log.Errorf("ProcessManagedTickets: %v: bad fee hash %q: %v", hash, status.FeeTxHash, err)
+				continue
 			}
 			err = ticket.UpdateFeePaid(ctx, *feeHash, c.Client.URL, c.Client.PubKey)
 			if err != nil {
-				return err
+				c.log.Errorf("ProcessManagedTickets: %v: record paid fee: %v", hash, err)
+				continue
 			}
 			_ = c.feePayment(ctx, ticket, true)
 		} else {

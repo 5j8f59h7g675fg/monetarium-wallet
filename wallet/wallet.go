@@ -7121,6 +7121,7 @@ func (w *Wallet) ForUnspentUnexpiredTickets(ctx context.Context,
 			case TicketStatusLive:
 			case TicketStatusImmature:
 			case TicketStatusUnspent:
+			case TicketStatusUnmined:
 			default:
 				continue
 			}
