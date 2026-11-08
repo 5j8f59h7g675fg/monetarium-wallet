@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/monetarium/monetarium-wallet/errors"
@@ -54,7 +55,55 @@ type VSPClient struct {
 	mu   sync.Mutex
 	jobs map[chainhash.Hash]*vspFeePayment
 
+	// lifetime is canceled when the owning wallet shuts down. Fee-payment
+	// background work must not use a purchase request ctx (it dies too soon)
+	// or a raw Background ctx (it outlives the wallet).
+	lifetime context.Context
+
 	log slog.Logger
+}
+
+// SetLifetime binds background VSP work to the wallet lifetime.
+func (c *VSPClient) SetLifetime(ctx context.Context) {
+	if ctx != nil {
+		c.lifetime = ctx
+	}
+}
+
+// UpdateMaxFee raises the fee cap if the new value is higher (sdiff can rise
+// while a cached client is still in use).
+func (c *VSPClient) UpdateMaxFee(fee dcrutil.Amount) {
+	if c.policy == nil {
+		return
+	}
+	if fee > c.policy.MaxFee {
+		c.policy.MaxFee = fee
+	}
+}
+
+func (c *VSPClient) lifetimeCtx() context.Context {
+	if c.lifetime != nil {
+		return c.lifetime
+	}
+	return context.Background()
+}
+
+// sameVSPHost compares VSP URLs ignoring trailing slashes and host case.
+func sameVSPHost(a, b string) bool {
+	return normalizeVSPURL(a) == normalizeVSPURL(b)
+}
+
+func normalizeVSPURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return strings.TrimRight(strings.ToLower(raw), "/")
+	}
+	u.Host = strings.ToLower(u.Host)
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 type VSPClientConfig struct {
@@ -98,11 +147,12 @@ func (w *Wallet) NewVSPClient(cfg VSPClientConfig, log slog.Logger, dialer DialF
 	}
 
 	v := &VSPClient{
-		wallet: w,
-		policy: cfg.Policy,
-		Client: client,
-		jobs:   make(map[chainhash.Hash]*vspFeePayment),
-		log:    log,
+		wallet:   w,
+		policy:   cfg.Policy,
+		Client:   client,
+		jobs:     make(map[chainhash.Hash]*vspFeePayment),
+		lifetime: context.Background(),
+		log:      log,
 	}
 	return v, nil
 }
@@ -295,11 +345,14 @@ func (c *VSPClient) SetVoteChoice(ctx context.Context, ticket *VSPTicket,
 	// Retrieve current voting preferences from VSP.
 	status, err := c.status(ctx, ticket)
 	if err != nil {
-		if errors.Is(err, errors.Locked) {
-			return err
-		}
+		// Upstream logged this and returned nil, treating an unreachable or
+		// erroring VSP as a completed update. The caller then reports success
+		// while the VSP keeps voting the previous choice — exactly the silent
+		// failure this call exists to prevent. Skarb surfaces the error
+		// instead; the sole caller (libwallet SetVoteChoice) reports which
+		// tickets did not get the new choice.
 		c.log.Errorf("Could not check status of VSP ticket %s: %v", ticket, err)
-		return nil
+		return err
 	}
 
 	// Check for any mismatch between the provided voting preferences and the
@@ -334,7 +387,7 @@ func (c *VSPClient) SetVoteChoice(ctx context.Context, ticket *VSPTicket,
 
 	// Check treasury policies.
 	for newKey, newChoice := range treasuryPolicy {
-		vspChoice, ok := status.TSpendPolicy[newKey]
+		vspChoice, ok := status.TreasuryPolicy[newKey]
 		if !ok {
 			update = true
 			break
